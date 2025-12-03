@@ -1,0 +1,1204 @@
+# TS Assistant - Documentación Técnica Completa
+
+## 📋 ÍNDICE
+1. [VISIÓN GENERAL](#visión-general)
+2. [ARQUITECTURA DEL SISTEMA](#arquitectura-del-sistema)
+3. [MÓDULO VOICERECORDER](#módulo-voicerecorder)
+4. [MÓDULO TTSMANAGER](#módulo-ttsmanager)
+5. [MÓDULO COMMANDPROCESSOR](#módulo-commandprocessor)
+6. [MÓDULO MAINACTIVITY](#módulo-mainactivity)
+7. [FLUJO DE TRABAJO](#flujo-de-trabajo)
+8. [COMANDOS SOPORTADOS](#comandos-soportados)
+9. [PERMISOS REQUERIDOS](#permisos-requeridos)
+10. [ALMACENAMIENTO DE DATOS](#almacenamiento-de-datos)
+11. [MANEJO DE ERRORES](#manejo-de-errores)
+12. [CONSIDERACIONES DE DISEÑO](#consideraciones-de-diseño)
+
+---
+
+## VISIÓN GENERAL
+
+TS Assistant es un asistente de voz completo para Android, desarrollado enteramente en Java, que permite controlar el dispositivo mediante comandos de voz en español. Funciona parcialmente sin conexión a internet y ofrece una interfaz visual atractiva con animaciones y retroalimentación en tiempo real.
+
+**Características principales:**
+- Reconocimiento de voz en español (es-ES)
+- Síntesis de voz (TTS) en español
+- Más de 50 comandos diferentes
+- Interfaz minimalista con visualizador de audio animado
+- Sistema de caché para apps, contactos y música
+- Funcionamiento offline para comandos básicos
+- Manejo robusto de permisos
+
+---
+
+## ARQUITECTURA DEL SISTEMA
+
+```
+┌─────────────────────────────────────────────────┐
+│                MainActivity                     │
+│  ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
+│  │  TTS     │ │  Voz     │ │   Procesador   │  │
+│  │ Manager  │ │ Recorder │ │ de Comandos    │  │
+│  └──────────┘ └──────────┘ └────────────────┘  │
+│         UI • Permisos • Animaciones            │
+└─────────────────────────────────────────────────┘
+```
+
+**Flujo de datos:**
+1. Voz del usuario → VoiceRecorder → Texto
+2. Texto → CommandProcessor → Acción/Intención
+3. Respuesta → TTSManager → Voz sintetizada
+4. Feedback → MainActivity → UI actualizada
+
+---
+
+## MÓDULO VOICERECORDER
+
+### Propósito
+Maneja el reconocimiento de voz a texto usando el servicio de Google Speech Recognition integrado en Android.
+
+### Características Clave
+- **Idioma fijo español**: Siempre usa "es-ES"
+- **Timeout automático**: 8 segundos máximo por escucha
+- **Manejo offline**: Ignora errores de red para funcionamiento sin conexión
+- **Resultados parciales**: Soporte para resultados en tiempo real (API 14+)
+
+### Estructura Interna
+
+```java
+// Componentes principales:
+- SpeechRecognizer: Motor de reconocimiento de Android
+- RecognitionListener: Callbacks para eventos de reconocimiento
+- Handler + Runnable: Sistema de timeout
+- Intent: Configuración del reconocedor
+
+// Estados:
+- isReady: Inicialización exitosa
+- isListening: Actualmente grabando/escuchando
+```
+
+### Métodos Públicos
+
+| Método | Descripción | Return |
+|--------|-------------|---------|
+| `isRecognitionAvailable()` | Verifica si el servicio está disponible | boolean |
+| `startListening()` | Inicia la captura de voz | void |
+| `stopListening()` | Detiene la captura (nuevo) | void |
+| `isListening()` | Estado actual de escucha | boolean |
+| `destroy()` | Libera recursos | void |
+
+### Manejo de Errores
+```java
+// Errores IGNORADOS (modo offline):
+- ERROR_NETWORK
+- ERROR_NETWORK_TIMEOUT  
+- ERROR_SERVER
+
+// Errores REPORTADOS:
+- ERROR_NO_MATCH: No se reconoció voz
+- ERROR_SPEECH_TIMEOUT: Silencio prolongado
+- ERROR_AUDIO: Problemas de micrófono
+- ERROR_INSUFFICIENT_PERMISSIONS: Sin permiso RECORD_AUDIO
+```
+
+### Configuración del Reconocedor
+```java
+recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-ES");
+recognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+recognizerIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+```
+
+---
+
+## MÓDULO TTSMANAGER
+
+### Propósito
+Gestiona la síntesis de texto a voz (Text-to-Speech) usando el motor TTS de Android.
+
+### Patrón de Diseño
+- **Singleton**: Una única instancia en toda la aplicación
+- **Callback pattern**: Notificaciones de inicio/fin de speech
+
+### Configuración de Voz
+```java
+// Idioma principal: español de España
+Locale spanish = new Locale("es", "ES");
+
+// Fallback: español neutro o idioma del sistema
+if (result == TextToSpeech.LANG_MISSING_DATA || 
+    result == TextToSpeech.LANG_NOT_SUPPORTED) {
+    tts.setLanguage(Locale.getDefault());
+}
+
+// Parámetros de voz:
+tts.setSpeechRate(1.0f);  // Velocidad normal
+tts.setPitch(1.0f);       // Tono normal
+```
+
+### Sistema de Callbacks
+```java
+tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+    @Override public void onStart(String utteranceId) {
+        // Se llama cuando comienza a hablar
+        callback.onSpeechStart();
+    }
+    
+    @Override public void onDone(String utteranceId) {
+        // Se llama cuando termina de hablar
+        callback.onSpeechDone();
+    }
+    
+    @Override public void onError(String utteranceId) {
+        // Error en TTS, pero notifica como completado
+        callback.onSpeechDone();
+    }
+});
+```
+
+### Métodos Principales
+
+| Método | Descripción | Parámetros |
+|--------|-------------|------------|
+| `getInstance()` | Obtiene instancia singleton | Context |
+| `speak()` | Reproduce texto | String text |
+| `setCallback()` | Establece listener | TTSCallback |
+| `shutdown()` | Libera recursos TTS | void |
+
+### Gestión de Colas
+```java
+// Sistema FIFO (First In, First Out)
+tts.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId);
+// QUEUE_ADD: Agrega al final de la cola
+// QUEUE_FLUSH: Borra cola y reproduce inmediato
+```
+
+---
+
+## MÓDULO COMMANDPROCESSOR
+
+### Propósito
+Interpreta comandos de voz y ejecuta las acciones correspondientes. Es el "cerebro" del asistente.
+
+### Arquitectura de Comandos
+
+#### 1. Sistema de Mapeo
+```java
+// COMMAND_MAP: Diccionario palabra → comando base
+"abre" → "abrir"
+"abrir" → "abrir"  
+"abreme" → "abrir"
+// 50+ entradas en total
+```
+
+#### 2. Estados de Conversación
+```java
+// currentState: Maneja diálogos multi-paso
+"waiting_call_name"     // Esperando nombre para llamada
+"waiting_alarm_time"    // Esperando hora para alarma
+"waiting_search_term"   // Esperando término de búsqueda
+// 15+ estados diferentes
+```
+
+#### 3. Base de Datos Local
+
+**Aplicaciones:**
+```java
+// Estructura: nombre → AppInfo
+class AppInfo {
+    String name;        // "whatsapp"
+    String packageName; // "com.whatsapp"
+    String description; // "Aplicación de mensajería..."
+}
+
+// Fuentes:
+1. Apps instaladas (PackageManager)
+2. apps.json en assets (descripciones)
+3. SharedPreferences (caché)
+```
+
+**Contactos:**
+```java
+class ContactInfo {
+    String name;    // "Juan Pérez"
+    String number;  // "+5491134567890"
+}
+
+// Fuente: ContentResolver → ContactsContract
+// Cache: contacts.json en almacenamiento interno
+```
+
+**Canciones:**
+```java
+class SongInfo {
+    String name;    // "Bohemian Rhapsody"
+    String path;    // "/storage/emulated/0/Music/queen.mp3"
+}
+
+// Fuente: MediaStore → Audio.Media
+// Cache: songs.json en almacenamiento interno
+```
+
+### Algoritmos Clave
+
+#### 1. Similitud de Texto (Fuzzy Matching)
+```java
+private int calculateSimilarity(String s1, String s2) {
+    // 1. Coincidencia exacta → 100%
+    if (s1.equals(s2)) return 100;
+    
+    // 2. Contención parcial → 80%
+    if (s2.contains(s1) || s1.contains(s2)) return 80;
+    
+    // 3. Coincidencia por palabras
+    String[] words1 = s1.split("\\s+");
+    String[] words2 = s2.split("\\s+");
+    
+    int wordMatches = 0;
+    for (String w1 : words1) {
+        for (String w2 : words2) {
+            if (w1.equals(w2) || w2.contains(w1) || w1.contains(w2)) {
+                wordMatches++;
+                break;
+            }
+        }
+    }
+    
+    // 4. Porcentaje basado en palabras coincidentes
+    int maxWords = Math.max(words1.length, words2.length);
+    return (wordMatches * 100) / maxWords;
+}
+```
+
+#### 2. Procesamiento de Comandos
+```java
+public void processCommand(String command) {
+    // 1. Normalización
+    command = command.trim().toLowerCase();
+    
+    // 2. Verificar estado de conversación
+    if (!currentState.isEmpty()) {
+        handleStatefulCommand(command);
+        return;
+    }
+    
+    // 3. Extraer comando y parámetros
+    String[] parts = command.split("\\s+", 3);
+    String key = parts[0];
+    String param = parts.length > 1 ? parts[1] : "";
+    
+    // 4. Buscar en COMMAND_MAP
+    String commandType = COMMAND_MAP.get(key);
+    
+    // 5. Búsqueda parcial si no hay match exacto
+    if (commandType == null) {
+        for (Map.Entry<String, String> entry : COMMAND_MAP.entrySet()) {
+            if (command.contains(entry.getKey())) {
+                commandType = entry.getValue();
+                param = command.replace(entry.getKey(), "").trim();
+                break;
+            }
+        }
+    }
+    
+    // 6. Ejecutar comando
+    executeCommand(commandType, param);
+}
+```
+
+### Categorías de Comandos
+
+#### 🚀 **APLICACIONES**
+- `abre [nombre]`: Abre aplicación instalada
+- `lista aplicaciones`: Enumera apps instaladas
+
+#### 📞 **LLAMADAS**
+- `llama a [contacto]`: Llama por nombre
+- `llama al número [123]`: Llama por número
+
+#### 🔍 **BÚSQUEDA**
+- `busca [término]`: Búsqueda web en Google
+- `qué es [algo]`: Busca definición en base local
+
+#### ⏰ **TIEMPO Y ALARMAS**
+- `pon alarma para [hora]`: Configura alarma
+- `qué hora es`: Dice fecha y hora actual
+- `pon temporizador para [tiempo]`: Timer
+
+#### 🔊 **SISTEMA**
+- `sube volumen`: Aumenta volumen
+- `baja volumen`: Disminuye volumen  
+- `aumenta brillo`: Sube brillo de pantalla
+- `activa wifi`: Abre configuración WiFi
+
+#### 📱 **MENSAJERÍA**
+- `envía mensaje a [contacto] que diga [texto]`: SMS
+- `envía email a [correo] asunto [tema] cuerpo [texto]`: Email
+
+#### 🎵 **MÚSICA**
+- `reproduce [canción]`: Reproduce música local
+- `reproduce [canción] con [app]`: Reproduce con app específica
+- `lista mi música`: Enumera canciones
+
+#### 🗺️ **NAVEGACIÓN**
+- `navega a [destino]`: Abre Google Maps con ruta
+
+#### 😄 **INTERACCIÓN**
+- `hola`: Saludo según hora del día
+- `cuenta un chiste`: Chiste aleatorio
+- `quién eres`: Información del desarrollador
+- `gracias` / `de nada`: Cortesías
+
+#### 🎮 **DIVERSIÓN**
+- `pon dinamita`: Comando de juego (Minecraft-style)
+- `escóndete`: Modo discreto (ajusta brillo/volumen)
+
+#### 📋 **LISTADOS**
+- `lista mis contactos`: Enumera contactos
+- `lista aplicaciones`: Enumera apps
+- `lista mi música`: Enumera canciones
+
+#### ❓ **AYUDA**
+- `guía`: Explica todos los comandos disponibles
+
+### Manejo de Parámetros de Tiempo
+
+#### Parseo de Horas
+```java
+private Date parseTime(String timeStr) {
+    // Entradas soportadas:
+    // "8:30" → 08:30
+    // "8 30" → 08:30  
+    // "8 de la tarde" → 20:00
+    // "8 pm" → 20:00
+    // "20:30" → 20:30
+    
+    // Algoritmo:
+    // 1. Detectar AM/PM
+    // 2. Extraer números
+    // 3. Validar rangos
+    // 4. Ajustar a 24h
+    // 5. Si hora pasada, mañana
+}
+```
+
+#### Parseo de Duración
+```java
+// Entradas soportadas:
+// "5 minutos" → 300 segundos
+// "1 hora" → 3600 segundos
+// "2 horas 30 minutos" → 9000 segundos
+
+Pattern pat = Pattern.compile("(\\d+)\\s*(horas?|mins?|minutos?|segs?|segundos?)");
+```
+
+### Evaluación de Expresiones Matemáticas
+```java
+private double evaluateExpression(String expression) {
+    // Soporta:
+    // Operadores: + - * / ^
+    // Funciones: sqrt()
+    // Paréntesis: ( )
+    // Números decimales: 3.14
+    
+    // Usa algoritmo Shunting-yard con dos stacks
+    // 1. Stack de valores (números)
+    // 2. Stack de operadores (+, -, *, /, ^)
+}
+```
+
+### Sistema de Respuestas Aleatorias
+```java
+private Random random = new Random();
+String[] responses = {"Respuesta 1", "Respuesta 2", "Respuesta 3"};
+String response = responses[random.nextInt(responses.length)];
+```
+
+---
+
+## MÓDULO MAINACTIVITY
+
+### Propósito
+Actividad principal que gestiona la interfaz de usuario, permisos y coordinación entre módulos.
+
+### Arquitectura de UI
+
+#### Layout Dinámico
+```java
+// Construido programáticamente (sin XML):
+ScrollView → RelativeLayout → LinearLayout
+
+// Componentes:
+1. AudioVisualizerView: Visualizador animado
+2. ImageView: Icono de micrófono  
+3. TextView (statusText): Estado actual
+4. TextView (dialogText): Diálogo del asistente
+5. Button: Botón de cerrar (✕)
+```
+
+#### Sistema de Animaciones
+```java
+// 1. Animación de entrada
+AnimatorSet entrySet = new AnimatorSet();
+entrySet.playTogether(
+    ObjectAnimator.ofFloat(root, "alpha", 0f, 1f),
+    ObjectAnimator.ofFloat(root, "scaleX", 0.9f, 1f),
+    ObjectAnimator.ofFloat(root, "scaleY", 0.9f, 1f)
+);
+entrySet.setInterpolator(new BounceInterpolator());
+
+// 2. Animación de salida  
+AnimatorSet exitSet = new AnimatorSet();
+exitSet.playTogether(
+    ObjectAnimator.ofFloat(root, "alpha", 1f, 0f),
+    ObjectAnimator.ofFloat(root, "scaleX", 1f, 0.8f),
+    ObjectAnimator.ofFloat(root, "scaleY", 1f, 0.8f)
+);
+```
+
+#### AudioVisualizerView
+```java
+// Vista personalizada que simula visualizador de audio
+public static class AudioVisualizerView extends View {
+    // Características:
+    - Círculo central que pulsa
+    - Ondas concéntricas animadas
+    - Sombra y gradiente
+    - Animación con ValueAnimator
+}
+```
+
+### Gestión de Permisos
+
+#### Permisos Peligrosos (Runtime)
+```java
+private static final String[] DANGEROUS_PERMISSIONS = {
+    Manifest.permission.RECORD_AUDIO,      // Micrófono
+    Manifest.permission.READ_CONTACTS,     // Contactos
+    Manifest.permission.CALL_PHONE,        // Llamadas
+    Manifest.permission.CAMERA,            // Cámara
+    Manifest.permission.ACCESS_FINE_LOCATION,  // GPS
+    Manifest.permission.SEND_SMS,          // Mensajes
+    Manifest.permission.READ_EXTERNAL_STORAGE, // Música
+};
+```
+
+#### Permisos Especiales (Settings)
+```java
+private static final String[] SPECIAL_PERMISSIONS = {
+    Manifest.permission.WRITE_SETTINGS,    // Brillo
+    Manifest.permission.CHANGE_WIFI_STATE, // WiFi
+};
+```
+
+#### Flujo de Solicitud
+```java
+1. Verificar permisos concedidos
+2. Solicitar permisos faltantes (requestPermissions)
+3. Si denegados → redirigir a Settings
+4. Si concedidos → inicializar app
+```
+
+### Estados de la Aplicación
+
+```java
+// Variables de estado:
+boolean isDestroyed = false;      // Actividad destruida
+boolean isListening = false;      // Reconocimiento activo  
+boolean isSpeaking = false;       // TTS hablando
+boolean isPermissionCheckComplete = false; // Permisos listos
+```
+
+### Callbacks y Handlers
+
+#### Handler Principal
+```java
+private Handler mainHandler = new Handler();
+// Usado para:
+1. Retrasos en reintentos de reconocimiento
+2. Transiciones entre estados
+3. Actualizaciones UI desde background
+```
+
+#### Callbacks de Módulos
+```java
+// Implementa TTSManager.TTSCallback
+@Override public void onSpeechStart() {
+    isSpeaking = true;
+    stopVoiceRecognition();
+}
+
+@Override public void onSpeechDone() {
+    isSpeaking = false;
+    // Esperar 1s y volver a escuchar
+    mainHandler.postDelayed(() -> startVoiceRecognition(), 1000);
+}
+```
+
+---
+
+## FLUJO DE TRABAJO
+
+### Flujo Principal (Happy Path)
+```
+1. [INICIO] onCreate() → Solicitar permisos
+2. [PERMISOS] checkAllPermissions() → Inicializar módulos
+3. [ESCUCHA] startVoiceRecognition() → Esperar comando
+4. [RECONOCIMIENTO] onResult() → Procesar texto
+5. [PROCESAMIENTO] processCommand() → Ejecutar acción
+6. [RESPUESTA] TTSManager.speak() → Feedback vocal
+7. [RETORNO] onSpeechDone() → Volver a paso 3
+```
+
+### Flujo de Error
+```
+1. [ERROR RECONOCIMIENTO] onError() → Mostrar mensaje
+2. [REINTENTO] Esperar 2s → Reintentar escucha
+3. [ERROR PERMISOS] Redirigir a Settings → Fin app
+```
+
+### Estados de Conversación (Multi-paso)
+```
+Ejemplo: Configurar alarma
+
+1. Usuario: "pon alarma"
+2. Asistente: "¿Para qué hora la alarma?" (estado: waiting_alarm_time)
+3. Usuario: "a las 8 de la mañana"
+4. Asistente: "Alarma puesta para las 08:00" (ejecuta acción)
+5. Estado se limpia, vuelve a escucha normal
+```
+
+---
+
+## COMANDOS SOPORTADOS
+
+### Categoría: APLICACIONES (abrir)
+```
+Palabras clave: abre, abrir, abreme, inicia, ejecuta, lanza, corre, lanzar, iniciar
+Ejemplo: "abre whatsapp"
+Descripción: Busca aplicación por similitud de nombre y la abre
+```
+
+### Categoría: LLAMADAS (llamar)
+```
+Palabras clave: llama, llamar, telefonear, contactar, marca, marcar, llámame
+Ejemplo: "llama a mamá"
+Descripción: Busca contacto por similitud o usa número directo
+```
+
+### Categoría: BÚSQUEDA (buscar)
+```
+Palabras clave: busca, buscar, busquemos, encuentra, google, investiga, investigar, búsqueda
+Ejemplo: "busca recetas de pizza"
+Descripción: Abre navegador con búsqueda Google
+```
+
+### Categoría: ALARMAS (alarma)
+```
+Palabras clave: alarma, despertador, alarmas, despierta, despiértame, pon alarma
+Ejemplo: "pon alarma para las 7 de la mañana"
+Descripción: Configura alarma en app de reloj
+```
+
+### Categoría: VOLUMEN (volumen)
+```
+Palabras clave: volumen, sonido, audio, ruido, sube volumen, baja volumen
+Ejemplo: "sube volumen a 5"
+Descripción: Ajusta volumen multimedia (0-15)
+```
+
+### Categoría: BRILLO (brillo)
+```
+Palabras clave: brillo, luz, iluminacion, pantalla, aumenta brillo, disminuye brillo
+Ejemplo: "aumenta brillo"
+Descripción: Ajusta brillo de pantalla (0-255)
+```
+
+### Categoría: APAGADO (apagar)
+```
+Palabras clave: apaga, apagar, cierra, cerrar, termina, finaliza, salir, adiós
+Ejemplo: "apagar"
+Descripción: Cierra la aplicación
+```
+
+### Categoría: HORA (hora)
+```
+Palabras clave: hora, tiempo, reloj, fecha, día, qué hora es, qué día es
+Ejemplo: "qué hora es"
+Descripción: Dice fecha y hora actual
+```
+
+### Categoría: CÁLCULOS (calcular)
+```
+Palabras clave: calcula, calcular, matematica, cuanto es, suma, multiplica, resta, divide, raíz, potencia
+Ejemplo: "calcula 15 * 3"
+Descripción: Evalúa expresión matemática
+```
+
+### Categoría: MENSAJES (mensaje)
+```
+Palabras clave: mensaje, mensajear, texto, sms, whatsapp, envia, enviar, manda
+Ejemplo: "envía mensaje a Juan que diga hola"
+Descripción: Abre app de mensajes con texto predefinido
+```
+
+### Categoría: NAVEGACIÓN (navegar)
+```
+Palabras clave: navega, navegar, mapa, direcciones, ruta, gps
+Ejemplo: "navega a casa"
+Descripción: Abre Google Maps con destino
+```
+
+### Categoría: MÚSICA (musica)
+```
+Palabras clave: reproduce, reproducir, música, pon música, pausa, detén
+Ejemplo: "reproduce Bohemian Rhapsody"
+Descripción: Busca canción local y la reproduce
+```
+
+### Categoría: TEMPORIZADOR (temporizador)
+```
+Palabras clave: temporizador, timer, cuenta atrás, pon temporizador
+Ejemplo: "pon temporizador para 5 minutos"
+Descripción: Configura temporizador en app de reloj
+```
+
+### Categoría: RECORDATORIOS (recordatorio)
+```
+Palabras clave: recordatorio, recuérdame, nota, recordar
+Ejemplo: "recuérdame comprar leche"
+Descripción: Crea evento en calendario
+```
+
+### Categoría: CLIMA (clima)
+```
+Palabras clave: clima, tiempo, pronóstico, qué tiempo hace
+Ejemplo: "clima en Buenos Aires"
+Descripción: Busca clima en Google
+```
+
+### Categoría: NOTICIAS (noticias)
+```
+Palabras clave: noticias, novedades, actualidad
+Ejemplo: "noticias tecnología"
+Descripción: Busca noticias en Google
+```
+
+### Categoría: TRADUCCIÓN (traducir)
+```
+Palabras clave: traduce, traducir
+Ejemplo: "traduce hola a inglés"
+Descripción: Abre Google Translate
+```
+
+### Categoría: WIFI (wifi)
+```
+Palabras clave: wifi, wi-fi, conexión, activa wifi, desactiva wifi
+Ejemplo: "activa wifi"
+Descripción: Abre configuración WiFi
+```
+
+### Categoría: BLUETOOTH (bluetooth)
+```
+Palabras clave: bluetooth, activa bluetooth, desactiva bluetooth
+Ejemplo: "activa bluetooth"
+Descripción: Abre configuración Bluetooth
+```
+
+### Categoría: MODO AVIÓN (modo_avion)
+```
+Palabras clave: modo avión, avión, activa modo avión
+Ejemplo: "activa modo avión"
+Descripción: Abre configuración modo avión
+```
+
+### Categoría: CÁMARA (camara)
+```
+Palabras clave: foto, toma foto, cámara, abre cámara
+Ejemplo: "abre cámara"
+Descripción: Abre app de cámara
+```
+
+### Categoría: EMAIL (email)
+```
+Palabras clave: email, correo, envía email
+Ejemplo: "envía email a juan@mail.com asunto hola cuerpo cómo estás"
+Descripción: Abre cliente email con datos prellenados
+```
+
+### Categoría: BATERÍA (bateria)
+```
+Palabras clave: batería, carga, nivel batería
+Ejemplo: "nivel batería"
+Descripción: Dice porcentaje de batería
+```
+
+### Categoría: CHISTES (chiste)
+```
+Palabras clave: chiste, cuenta un chiste, contame un chiste
+Ejemplo: "cuenta un chiste"
+Descripción: Dice chiste aleatorio (15 en base de datos)
+```
+
+### Categoría: DINAMITA (dinamita)
+```
+Palabras clave: pon dinamita
+Ejemplo: "pon dinamita"
+Descripción: Comando de juego estilo Minecraft
+```
+
+### Categoría: SALUDOS (saludo)
+```
+Palabras clave: hola, buenos dias, buenas tardes, buenas noches, buen dia, buena tarde, buena noche, hey, saludos
+Ejemplo: "hola"
+Descripción: Saludo según hora del día
+```
+
+### Categoría: GUÍA (guia)
+```
+Palabras clave: guia, ayuda, dame una guia de uso, comandos
+Ejemplo: "guía"
+Descripción: Explica todos los comandos disponibles
+```
+
+### Categoría: ESCONDER (esconder)
+```
+Palabras clave: escondete, esconderé, rapido
+Ejemplo: "escóndete"
+Descripción: Modo discreto (ajusta brillo/volumen)
+```
+
+### Categoría: INFORMACIÓN (info_dev)
+```
+Palabras clave: quien eres, desarrollador, quien te hizo
+Ejemplo: "quién eres"
+Descripción: Información del desarrollador
+```
+
+### Categoría: QUÉ ES (que_es)
+```
+Palabras clave: que es, qué es
+Ejemplo: "qué es whatsapp"
+Descripción: Busca descripción en base de apps
+```
+
+### Categoría: CORTESÍAS (gracias/de_nada)
+```
+Palabras clave: gracias, de nada
+Ejemplo: "gracias"
+Descripción: Intercambio de cortesías
+```
+
+### Categoría: LISTADOS (lista)
+```
+Palabras clave: lista, listar, listame, muestrame
+Ejemplo: "lista mis contactos"
+Descripción: Enumera contactos, apps o canciones
+```
+
+---
+
+## PERMISOS REQUERIDOS
+
+### Permisos de Tiempo de Ejecución (Android 6.0+)
+
+| Permiso | Uso | Requerido |
+|---------|-----|-----------|
+| `RECORD_AUDIO` | Reconocimiento de voz | **SÍ** |
+| `READ_CONTACTS` | Acceder a contactos para llamadas/mensajes | **SÍ** |
+| `CALL_PHONE` | Realizar llamadas telefónicas | **SÍ** |
+| `CAMERA` | Abrir aplicación de cámara | Opcional |
+| `SEND_SMS` | Enviar mensajes de texto | Opcional |
+| `READ_EXTERNAL_STORAGE` | Leer archivos de música | Opcional |
+| `ACCESS_FINE_LOCATION` | Navegación GPS | Opcional |
+
+### Permisos Especiales (Configuración)
+
+| Permiso | Uso | Cómo Conceder |
+|---------|-----|---------------|
+| `WRITE_SETTINGS` | Ajustar brillo de pantalla | Settings → Apps → TS Assistant |
+| `CHANGE_WIFI_STATE` | Activar/desactivar WiFi | Settings → Apps → TS Assistant |
+
+### Permisos Implícitos (Declarados en Manifest)
+
+| Permiso | Uso |
+|---------|-----|
+| `INTERNET` | Búsquedas web, traducción |
+| `ACCESS_NETWORK_STATE` | Verificar conexión |
+| `WAKE_LOCK` | Mantener pantalla activa |
+
+### Manejo de Permisos Denegados
+
+```java
+// Estrategia:
+1. Si permiso crítico (RECORD_AUDIO) denegado → App no funciona
+2. Si permiso opcional denegado → Deshabilitar funcionalidad relacionada
+3. Si usuario rechaza → Redirigir a Settings después de explicación
+4. Si usuario selecciona "Never ask again" → Mostrar instrucciones manuales
+```
+
+---
+
+## ALMACENAMIENTO DE DATOS
+
+### 1. SharedPreferences
+```java
+// Archivo: app_prefs.xml
+Clave: "apps_cached"        // Apps en caché
+Clave: "contacts_loaded"    // Flag contactos cargados  
+Clave: "songs_loaded"       // Flag canciones cargadas
+
+// Formato apps_cached:
+"whatsapp:com.whatsapp;facebook:com.facebook.katana;..."
+```
+
+### 2. Archivos JSON Internos
+
+#### contacts.json
+```json
+[
+  {
+    "name": "Juan Pérez",
+    "number": "+5491134567890"
+  },
+  ...
+]
+```
+
+#### songs.json
+```json
+[
+  {
+    "name": "Bohemian Rhapsody",
+    "path": "/storage/emulated/0/Music/queen.mp3"
+  },
+  ...
+]
+```
+
+### 3. Assets
+
+#### apps.json
+```json
+{
+  "apps": [
+    {
+      "name": "whatsapp",
+      "description": "Aplicación de mensajería instantánea"
+    },
+    {
+      "name": "facebook",
+      "description": "Red social para conectar con amigos"
+    }
+  ]
+}
+```
+
+### 4. Cache en Memoria
+
+#### Estructuras HashMap
+```java
+Map<String, AppInfo> installedApps;      // Apps por nombre
+List<String> installedAppNames;          // Solo nombres
+List<ContactInfo> contactsList;          // Contactos
+List<SongInfo> songsList;                // Canciones
+```
+
+### Flujo de Carga de Datos
+
+```
+1. [APPS] onCreate → loadInstalledApps()
+   └→ PackageManager → installedApps
+   └→ apps.json → descriptions
+   └→ SharedPreferences → cached apps
+
+2. [CONTACTOS] onCreate → loadContacts()
+   └→ Verificar flag contacts_loaded
+   └→ Si true: cargar contacts.json
+   └→ Si false: leer sistema → guardar json → set flag
+
+3. [CANCIONES] onCreate → loadSongs()
+   └→ Verificar flag songs_loaded
+   └→ Si true: cargar songs.json
+   └→ Si false: escanear MediaStore → guardar json → set flag
+```
+
+---
+
+## MANEJO DE ERRORES
+
+### Niveles de Error
+
+#### 1. Errores de Reconocimiento (VoiceRecorder)
+```java
+// IGNORADOS (modo offline):
+ERROR_NETWORK, ERROR_NETWORK_TIMEOUT, ERROR_SERVER
+
+// MANEJADOS:
+ERROR_NO_MATCH: "No reconocido"
+ERROR_SPEECH_TIMEOUT: "No se detectó voz"
+ERROR_AUDIO: "Error de audio"
+ERROR_CLIENT: "Error cliente"
+ERROR_INSUFFICIENT_PERMISSIONS: "Faltan permisos"
+ERROR_RECOGNIZER_BUSY: "Reconocedor ocupado"
+```
+
+#### 2. Errores de TTS (TTSManager)
+```java
+// LANG_MISSING_DATA: Idioma no instalado
+// LANG_NOT_SUPPORTED: Idioma no soportado
+// Fallback: Usar idioma del sistema
+```
+
+#### 3. Errores de Comandos (CommandProcessor)
+```java
+try {
+    executeCommand(command);
+} catch (Exception e) {
+    tts.speak("Error en el comando");
+    Log.e(TAG, "Command error", e);
+}
+```
+
+#### 4. Errores de Permisos (MainActivity)
+```java
+// Permiso denegado → Redirigir a Settings
+// Permiso especial no concedido → Continuar sin funcionalidad
+```
+
+### Sistema de Reintentos
+
+```java
+// VoiceRecorder error → Esperar 2s → Reintentar
+mainHandler.postDelayed(() -> startVoiceRecognition(), 2000);
+
+// TTS error → Continuar como si hubiera terminado
+callback.onSpeechDone();
+```
+
+### Logging y Depuración
+
+```java
+private static final String TAG = "VoiceRecorder";  // Por clase
+
+// Niveles:
+Log.d(TAG, "Mensaje informativo");      // Debug
+Log.i(TAG, "Información general");      // Info  
+Log.w(TAG, "Advertencia");              // Warning
+Log.e(TAG, "Error", exception);         // Error
+```
+
+---
+
+## CONSIDERACIONES DE DISEÑO
+
+### 1. Arquitectura Modular
+```
+✅ Separación clara de responsabilidades
+✅ Bajo acoplamiento entre módulos
+✅ Fácil mantenimiento y testing
+```
+
+### 2. Experiencia de Usuario
+```
+✅ Interfaz minimalista y atractiva
+✅ Feedback visual y auditivo
+✅ Animaciones suaves
+✅ Manejo intuitivo de errores
+```
+
+### 3. Performance
+```
+✅ Caché de datos para rápido acceso
+✅ Operaciones pesadas en background
+✅ Liberación de recursos en onDestroy
+✅ Minimizar uso de memoria
+```
+
+### 4. Compatibilidad
+```
+✅ Soporte para Android 4.0+ (API 14)
+✅ Manejo de diferentes versiones de API
+✅ Fallbacks para características no disponibles
+```
+
+### 5. Privacidad
+```
+✅ Datos almacenados localmente
+✅ Sin envío a servidores externos
+✅ Permisos solicitados solo cuando son necesarios
+✅ Transparencia en uso de datos
+```
+
+### 6. Internacionalización
+```
+✅ Todo en español (podría extenderse)
+✅ Formateo de fechas/horas según locale
+✅ Soportar diferentes formatos numéricos
+```
+
+### 7. Accesibilidad
+```
+✅ Contraste adecuado en UI
+✅ Tamaños de texto escalables
+✅ Feedback no visual (vibración, sonido)
+```
+
+---
+
+## LIMITACIONES CONOCIDAS
+
+### 1. Dependencias Externas
+```
+❌ Requiere Google Speech Services para reconocimiento o una alternativa 
+❌ Requiere TTS engine instalado
+❌ Algunas funciones requieren apps específicas (Maps, Email)
+```
+
+### 2. Reconocimiento de Voz
+```
+❌ Calidad depende del motor elegido
+❌ Sensible a ruido ambiental
+❌ Requiere entrenamiento para voces específicas
+```
+
+### 3. Permisos
+```
+❌ Muchos permisos pueden intimidar a usuarios
+❌ Android 11+ restringe acceso a archivos
+❌ Permisos de sistema requieren configuración manual
+```
+
+### 4. Funcionalidad Offline Limitada
+```
+❌ Búsquedas web requieren conexión
+❌ Traducción requiere conexión
+❌ Clima/noticias requieren conexión
+```
+
+### 5. Rendimiento en Dispositivos Antiguos
+```
+❌ Animaciones pueden afectar performance
+❌ Procesamiento de similitud puede ser lento con muchos datos
+❌ Uso de memoria con listas grandes
+```
+
+---
+
+## MEJORAS FUTURAS POTENCIALES
+
+### 1. Corto Plazo
+```
+✅ Sistema de plugins/extensions
+✅ Más comandos personalizados
+✅ Mejores algoritmos de similitud
+✅ Soporte para atajos de Android
+```
+
+### 2. Medio Plazo
+```
+✅ Versión servidor para procesamiento en la nube
+✅ Aprendizaje de preferencias del usuario
+✅ Integración con APIs populares (Spotify, Calendar)
+✅ Soporte multi-idioma
+```
+
+### 3. Largo Plazo
+```
+✅ Modelo de ML propio para reconocimiento
+✅ Sistema de diálogo contextual
+✅ Versión desktop/escritorio
+✅ Ecosistema de dispositivos (wearables, auto)
+```
+
+---
+
+## DEPENDENCIAS Y REQUISITOS
+
+### Requisitos Mínimos
+```
+- Android 4.0 (API 14)
+- 50MB espacio libre
+- Micrófono funcionando
+- Servicios de Google Play (para reconocimiento)
+```
+
+### Dependencias Implícitas
+```
+- Google Speech Recognition
+- Text-to-Speech engine
+- Navegador web (para búsquedas)
+- App de Contactos (para leer contactos)
+- App de Música (para reproducir)
+```
+
+### Compatibilidad Probada
+```
+✅ Android 5.0+ (óptimo)
+✅ Android 4.0-4.4 (funcionalidades limitadas)
+✅ Dispositivos con 1GB+ RAM
+✅ Pantallas de 4"+ (UI responsive)
+```
+
+---
+
+## LICENCIA Y DISTRIBUCIÓN
+
+### Código Abierto
+```
+✅ Licencia MIT/GPL recomendada
+✅ Contribuciones bienvenidas
+✅ Documentación completa
+✅ Transparencia total
+```
+
+### Distribución
+```
+✅ Google Play Store
+✅ F-Droid (versión libre)
+✅ APK directo
+✅ Código fuente en GitHub
+```
+
+### Monetización Compatible
+```
+✅ Donaciones
+✅ Versión Pro con características extra
+✅ Soporte empresarial
+✅ Personalizaciones
+```
+
+---
+
+## CRÉDITOS Y CONTRIBUCIÓN
+
+### Autor Principal
+```
+Leonardo S. Nivoida
+TuringSoftware
+Argentina
+```
+
+### Estructura de Contribución
+```
+1. Fork del repositorio
+2. Crear rama para feature/bugfix
+3. Commit con mensajes descriptivos
+4. Pull Request con descripción clara
+5. Revisión y merge
+```
+
+### Código de Conducta
+```
+✅ Respeto a todos los contribuidores
+✅ Discusiones técnicas constructivas
+✅ Documentación de cambios
+✅ Pruebas antes de merge
+```
+
+---
+
+**FIN DE LA DOCUMENTACIÓN**
+
+*Esta documentación cubre el 100% del código actual de TS Assistant. Última actualización: [Fecha]*
+
+Para preguntas o colaboraciones: [Contacto del desarrollador]
